@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=bglin
+GenericName=Wallpaper Slideshow
+Comment=Slideshow wallpaper manager with tags (LumaLoop for Linux)
+Exec=bglin gui
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;DesktopSettings;Utility;
+Keywords=wallpaper;background;slideshow;

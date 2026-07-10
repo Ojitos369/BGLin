@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+
+# Runtime artifacts (live in XDG dirs, never in the repo)
+*.pid
+*.sock
+
+# OS
+.DS_Store
+Thumbs.db

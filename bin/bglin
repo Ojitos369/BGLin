@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# bglin launcher — resolves the repo location even through a symlink.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+exec python3 -c "import sys; sys.path.insert(0, '$REPO'); from bglin.__main__ import main; sys.exit(main())" "$@"
