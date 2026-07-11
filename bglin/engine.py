@@ -50,9 +50,12 @@ class Engine:
         self.playlist = files
         # Keep position on the same media if it survived the rebuild
         self.index = files.index(current) if current in files else -1
-        for mon_idx, pos in list(self._mon_pos.items()):
-            item = old[pos % len(old)] if old else None
-            self._mon_pos[mon_idx] = files.index(item) if item in files else mon_idx
+        if self.config.monitor_mode == "same":
+            self._mon_pos.clear()
+        else:
+            for mon_idx, pos in list(self._mon_pos.items()):
+                item = old[pos % len(old)] if old else None
+                self._mon_pos[mon_idx] = files.index(item) if item in files else mon_idx
 
     def current(self) -> str | None:
         if 0 <= self.index < len(self.playlist):
@@ -67,9 +70,29 @@ class Engine:
 
     def _pos(self, mon_index: int) -> int:
         """This monitor's playlist position (staggered start)."""
+        if self.config.monitor_mode == "same":
+            self._mon_pos.clear()
+            return self.index if self.index >= 0 else 0
+
+        if not self.playlist:
+            return 0
+
+        # Ensure the requested monitor is in the dict
         if mon_index not in self._mon_pos:
             base = self.index if self.index >= 0 else 0
             self._mon_pos[mon_index] = (base + mon_index) % len(self.playlist)
+
+        # Resolve duplicates among all currently stored monitor positions
+        # (to handle stale loaded states or same-mode transitions)
+        seen = {}
+        for m_idx in sorted(self._mon_pos.keys()):
+            pos = self._mon_pos[m_idx] % len(self.playlist)
+            if len(seen) < len(self.playlist):
+                while pos in seen.values():
+                    pos = (pos + 1) % len(self.playlist)
+            seen[m_idx] = pos
+        self._mon_pos = seen
+
         return self._mon_pos[mon_index]
 
     def _delay_for_item(self, item: str | None) -> int:

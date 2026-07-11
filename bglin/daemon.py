@@ -54,6 +54,15 @@ class Daemon:
             eng.config = Config.load()
             eng.rebuild()
             eng.reset_timers()
+            # Repaint immediately to apply changes
+            from . import screens
+            mons = screens.monitors()
+            if eng._independent(mons):
+                for mon in mons:
+                    eng._pos(mon.index)
+                eng._render_different(mons)
+            else:
+                eng._apply_same(mons)
             self._wake.set()  # re-read interval immediately
             return {"ok": True, "total": len(eng.playlist)}
         if action == "status":
