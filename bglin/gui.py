@@ -30,6 +30,7 @@ flowboxchild { padding: 0; }
 .selected-thumb { border: 3px solid @theme_selected_bg_color;
                   background-color: @theme_selected_bg_color; }
 .selected-thumb-label { color: @theme_selected_bg_color; font-weight: bold; }
+.cursor-thumb { border: 3px dashed @theme_fg_color; }
 .check-badge { background-color: @theme_selected_bg_color;
                color: @theme_selected_fg_color; border-radius: 0 0 0 6px;
                padding: 1px 6px; font-weight: bold; }
@@ -52,9 +53,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self._frames: dict[str, Gtk.Frame] = {}
         self._checks: dict[str, Gtk.Widget] = {}
         self._tag_labels: dict[str, Gtk.Label] = {}
+        self._boxes: dict[str, Gtk.Widget] = {}
         self._visible: list[str] = []      # paths in display order
         self._selected: set[str] = set()
-        self._anchor: str | None = None    # shift-click range origin
+        self._anchor: str | None = None    # shift range origin
+        self._cursor: str | None = None    # keyboard focus item
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
@@ -189,6 +192,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Gallery
         scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        self.gallery_scroll = scroll
         self.flow = Gtk.FlowBox()
         self.flow.set_valign(Gtk.Align.START)
         self.flow.set_max_children_per_line(8)
@@ -251,11 +255,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self._frames.clear()
         self._checks.clear()
         self._tag_labels.clear()
+        self._boxes.clear()
         self._visible = files
         # Drop selected items that the filter/rescan took off screen
         self._selected &= set(files)
         if self._anchor not in self._selected:
             self._anchor = None
+        if self._cursor not in files:
+            self._cursor = None
         self._rebuild_chips()
         if not files:
             placeholder = Gtk.Label(
@@ -317,6 +324,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._frames[path] = frame
         self._checks[path] = check
         self._tag_labels[path] = tag_label
+        self._boxes[path] = box
         self._paint_selection(path)
         return box
 
@@ -346,6 +354,7 @@ class MainWindow(Gtk.ApplicationWindow):
             # Right-click outside the selection acts on that item alone
             if path not in self._selected:
                 self._set_selection([path], anchor=path)
+            self._set_cursor(path, scroll=False)
             self._thumb_context_menu(event)
             return True
 
@@ -363,14 +372,12 @@ class MainWindow(Gtk.ApplicationWindow):
         if ctrl:
             self._toggle_selection(path)
         elif shift and self._anchor in self._visible:
-            start = self._visible.index(self._anchor)
-            end = self._visible.index(path)
-            lo, hi = sorted((start, end))
-            self._set_selection(self._visible[lo:hi + 1], anchor=self._anchor)
+            self._select_range(self._anchor, path)
         elif self._selected == {path}:
             self._clear_selection()   # click again on the only item: deselect
         else:
             self._set_selection([path], anchor=path)
+        self._set_cursor(path, scroll=False)
         return True
 
     # ---------- selection ----------
@@ -385,6 +392,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if frame is not None:
             style = frame.get_style_context()
             (style.add_class if selected else style.remove_class)("selected-thumb")
+            cursor = path == self._cursor
+            (style.add_class if cursor else style.remove_class)("cursor-thumb")
         check = self._checks.get(path)
         if check is not None:
             check.set_visible(selected)
@@ -415,12 +424,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self._paint_selection(path)
         self._update_selection_ui()
 
+    def _select_range(self, start_path: str, end_path: str) -> None:
+        """Select every item between two paths, inclusive."""
+        start = self._visible.index(start_path)
+        end = self._visible.index(end_path)
+        lo, hi = sorted((start, end))
+        self._set_selection(self._visible[lo:hi + 1], anchor=start_path)
+
     def _select_all(self) -> None:
         self._set_selection(list(self._visible),
                             anchor=self._visible[0] if self._visible else None)
 
     def _clear_selection(self) -> None:
-        self._set_selection([], anchor=None)
+        self._set_selection([])
+        self._anchor = None
 
     def _update_selection_ui(self) -> None:
         count = len(self._selected)
@@ -429,9 +446,97 @@ class MainWindow(Gtk.ApplicationWindow):
             f"{count} selected — tags apply to all of them" if count != 1
             else "1 selected")
 
+    # ---------- keyboard navigation ----------
+
+    def _set_cursor(self, path: str | None, scroll: bool = True) -> None:
+        old, self._cursor = self._cursor, path
+        if old is not None:
+            self._paint_selection(old)
+        if path is not None:
+            self._paint_selection(path)
+            if scroll:
+                self._scroll_to(path)
+
+    def _scroll_to(self, path: str) -> None:
+        box = self._boxes.get(path)
+        if box is None:
+            return
+        adj = self.gallery_scroll.get_vadjustment()
+        coords = box.translate_coordinates(self.flow, 0, 0)
+        if coords is None:
+            return
+        top = coords[1]
+        bottom = top + box.get_allocated_height()
+        page = adj.get_page_size()
+        if top < adj.get_value():
+            adj.set_value(max(adj.get_lower(), top))
+        elif bottom > adj.get_value() + page:
+            adj.set_value(min(adj.get_upper() - page, bottom - page))
+
+    def _columns(self) -> int:
+        """Items per row, read from the current FlowBox allocation."""
+        children = self.flow.get_children()
+        if not children:
+            return 1
+        first_y = children[0].get_allocation().y
+        cols = sum(1 for c in children if c.get_allocation().y == first_y)
+        return max(1, cols)
+
+    def _rows_per_page(self) -> int:
+        children = self.flow.get_children()
+        if not children:
+            return 1
+        row_height = children[0].get_allocated_height()
+        if row_height <= 0:
+            return 1
+        page = self.gallery_scroll.get_vadjustment().get_page_size()
+        return max(1, int(page // row_height))
+
+    def _cursor_index(self) -> int:
+        if self._cursor in self._visible:
+            return self._visible.index(self._cursor)
+        return -1
+
+    def _move_cursor(self, delta: int, ctrl: bool, shift: bool) -> None:
+        """File-manager arrow behaviour.
+
+        Plain: cursor moves and becomes the sole selection.
+        Shift: cursor moves and the selection spans anchor..cursor.
+        Ctrl:  cursor moves, selection untouched (Ctrl+Space then picks).
+        """
+        if not self._visible:
+            return
+        index = self._cursor_index()
+        if index < 0:
+            target = 0 if delta > 0 else len(self._visible) - 1
+        else:
+            target = max(0, min(len(self._visible) - 1, index + delta))
+        path = self._visible[target]
+        if ctrl:
+            self._set_cursor(path)
+            return
+        if shift:
+            if self._anchor not in self._visible:
+                self._anchor = self._cursor or path
+            self._set_cursor(path)
+            self._select_range(self._anchor, path)
+            return
+        self._set_cursor(path)
+        self._set_selection([path], anchor=path)
+
+    def _jump_cursor(self, target: int, ctrl: bool, shift: bool) -> None:
+        index = self._cursor_index()
+        base = index if index >= 0 else 0
+        self._move_cursor(target - base, ctrl, shift)
+
     def _on_key_press(self, _widget, event) -> bool:
+        focus = self.get_focus()
+        if isinstance(focus, (Gtk.Entry, Gtk.ComboBox, Gtk.Switch)):
+            return False
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
+        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
         key = Gdk.keyval_name(event.keyval)
+
         if key == "Escape" and self._selected:
             self._clear_selection()
             return True
@@ -441,12 +546,61 @@ class MainWindow(Gtk.ApplicationWindow):
         if ctrl and key in ("t", "T") and self._selected:
             self._edit_tags_dialog(self._selection_list())
             return True
+
+        if not self._visible:
+            return False
+
+        steps = {"Left": -1, "Right": 1,
+                 "Up": -self._columns(), "Down": self._columns()}
+        if key in steps:
+            self._move_cursor(steps[key], ctrl, shift)
+            return True
+        if key in ("Page_Up", "Page_Down"):
+            rows = self._rows_per_page() * self._columns()
+            self._move_cursor(-rows if key == "Page_Up" else rows, ctrl, shift)
+            return True
+        if key == "Home":
+            self._jump_cursor(0, ctrl, shift)
+            return True
+        if key == "End":
+            self._jump_cursor(len(self._visible) - 1, ctrl, shift)
+            return True
+
+        if key in ("space", "KP_Space") and self._cursor:
+            if ctrl:
+                self._toggle_selection(self._cursor)
+            else:
+                self._set_selection([self._cursor], anchor=self._cursor)
+            return True
+        if key in ("Return", "KP_Enter") and self._cursor:
+            self._send("show", path=self._cursor)
+            self.status_label.set_text(f"Wallpaper set: {self._cursor}")
+            return True
+        if key in ("Menu", "F10") and self._selected:
+            self._thumb_menu_at_cursor()
+            return True
         return False
 
+    def _thumb_menu_at_cursor(self) -> None:
+        menu = self._build_thumb_menu()
+        if menu is None:
+            return
+        box = self._boxes.get(self._cursor) if self._cursor else None
+        if box is not None:
+            menu.popup_at_widget(box, Gdk.Gravity.SOUTH_WEST,
+                                 Gdk.Gravity.NORTH_WEST, None)
+        else:
+            menu.popup_at_pointer(None)
+
     def _thumb_context_menu(self, event) -> None:
+        menu = self._build_thumb_menu()
+        if menu is not None:
+            menu.popup_at_pointer(event)
+
+    def _build_thumb_menu(self) -> Gtk.Menu | None:
         targets = self._selection_list()
         if not targets:
-            return
+            return None
         single = targets[0] if len(targets) == 1 else None
         menu = Gtk.Menu()
         entries: list[tuple[str, object]] = []
@@ -466,7 +620,7 @@ class MainWindow(Gtk.ApplicationWindow):
             item.connect("activate", callback)
             menu.append(item)
         menu.show_all()
-        menu.popup_at_pointer(event)
+        return menu
 
     def _open_folder(self, folder: str) -> None:
         subprocess.Popen(["xdg-open", folder],
