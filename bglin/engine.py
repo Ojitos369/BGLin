@@ -38,9 +38,9 @@ class Engine:
         files = self.catalog.scan(self.config.media_path, self.config.auto_tag_on_scan)
         if not self.config.video_enabled:
             files = [f for f in files if not is_video(f)]
-        if self.config.filter_enabled and self.config.filter_tags:
-            files = self.catalog.filter(files, self.config.filter_tags,
-                                        self.config.filter_mode)
+        # Hidden tags always take media out; the selection only when enabled
+        active = self.config.filter_tags if self.config.filter_enabled else []
+        files = self.catalog.filter(files, active, self.config.filter_mode)
         if self.config.order == "shuffle":
             rng = random.Random()
             files = files[:]

@@ -17,10 +17,14 @@ CLI.
 
 ## Key Features
 
-* **Tag system (LumaLoop-style)**
+* **Tag system (LumaLoop-compatible)**
   * **Auto-tagging**: tags derived from file names (`beach_sunset-01.jpg` → `beach`, `sunset`).
-  * **Logical filtering**: AND / OR / XOR over selected tags.
-  * **Export/Import**: back up the tag catalog as JSON (matched by file name).
+  * **Nine filter modes**, the same `TagFilterMode` values LumaLoop uses:
+    `and`, `or`, `xor`, `only`, `exact`, `not_any`, `xand`, `not_only`, `not_exact`.
+  * **Hidden tags** (media carrying them is never shown) and **ignored tags**
+    (no filter mode takes them into account), as in LumaLoop.
+  * **Export/Import**: LumaLoop's tag file — the very same `tags.json` works in
+    LumaLoop, bglin and VSBG (see below).
 * **Mixed media**: images **and videos** as wallpaper, like the original.
   * Videos play muted in a loop via GStreamer in a desktop-layer window
     (no mpv/xwinwrap needed); optional audio toggle in Settings.
@@ -97,6 +101,28 @@ bglin stop        # stop the daemon
 
 State lives in XDG dirs: config/catalog in `~/.config/bglin/`, thumbnail
 cache in `~/.cache/bglin/`, playback position in `~/.local/state/bglin/`.
+
+## Shared tag file (LumaLoop / bglin / VSBG)
+
+**Tag catalog → Export/Import JSON…** reads and writes LumaLoop's tag file, so
+one file can carry your tags across the three apps:
+
+```json
+{
+  "catalog": ["beach", "nsfw", "sunset"],
+  "mappings": { "beach sunset.jpg": ["beach", "sunset"] },
+  "activeTags": ["sunset"],
+  "hiddenTags": ["nsfw"],
+  "ignoredFilterTags": ["4k"],
+  "tagFilterMode": "or",
+  "autoTagEnabled": true
+}
+```
+
+Entries are keyed by **file name**, so the same file works even when each device
+keeps its media elsewhere. Importing **merges** the incoming tags into whatever a
+file already has and restores the filter state; local tags are kept by absolute
+path in `~/.config/bglin/catalog.json`.
 
 ## Project License
 

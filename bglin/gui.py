@@ -17,7 +17,7 @@ from pathlib import Path
 from . import daemon
 from .catalog import Catalog, is_video
 from .config import (Config, MODES, MODE_LABELS, MONITOR_MODES, ORDERS,
-                     FILTER_MODES)
+                     FILTER_MODES, FILTER_MODE_LABELS)
 from .engine import Engine
 from .thumbs import thumbnail_for
 
@@ -171,9 +171,10 @@ class MainWindow(Gtk.ApplicationWindow):
         filter_bar.pack_start(Gtk.Label(label="Filter:"), False, False, 0)
         filter_bar.pack_start(self.filter_switch, False, False, 0)
 
-        self.filter_mode_combo = Gtk.ComboBoxText()
+        self.filter_mode_combo = Gtk.ComboBoxText(
+            tooltip_text="Tag filter mode (LumaLoop)")
         for m in FILTER_MODES:
-            self.filter_mode_combo.append(m, m)
+            self.filter_mode_combo.append(m, FILTER_MODE_LABELS[m])
         self.filter_mode_combo.set_active_id(self.config.filter_mode)
         self.filter_mode_combo.connect("changed", self._on_filter_mode)
         filter_bar.pack_start(self.filter_mode_combo, False, False, 0)
@@ -242,9 +243,8 @@ class MainWindow(Gtk.ApplicationWindow):
             # The daemon may have touched catalog.json since we last read it
             self.catalog.reload_if_changed()
         files = list(self.catalog.present)
-        if self.config.filter_enabled and self.config.filter_tags:
-            files = self.catalog.filter(files, self.config.filter_tags,
-                                        self.config.filter_mode)
+        active = self.config.filter_tags if self.config.filter_enabled else []
+        files = self.catalog.filter(files, active, self.config.filter_mode)
         for child in self.flow.get_children():
             self.flow.remove(child)
         self._thumb_widgets.clear()
@@ -499,7 +499,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.refresh_gallery(rescan=False)
 
     def _on_filter_mode(self, combo: Gtk.ComboBoxText) -> None:
-        self.config.filter_mode = combo.get_active_id() or "OR"
+        self.config.filter_mode = combo.get_active_id() or "or"
         self.config.save()
         if self.config.filter_enabled:
             self.refresh_gallery(rescan=False)
@@ -691,14 +691,16 @@ class MainWindow(Gtk.ApplicationWindow):
             box.set_margin_start(m); box.set_margin_end(m)
             box.set_margin_top(m); box.set_margin_bottom(m)
 
-        store = Gtk.ListStore(str, int)
-        for tag, count in self.catalog.tag_counts().items():
-            store.append([tag, count])
+        store = Gtk.ListStore(str, int, str, str)
         tree = Gtk.TreeView(model=store)
         tree.append_column(Gtk.TreeViewColumn(
             "Tag", Gtk.CellRendererText(), text=0))
         tree.append_column(Gtk.TreeViewColumn(
             "Files", Gtk.CellRendererText(), text=1))
+        tree.append_column(Gtk.TreeViewColumn(
+            "Hidden", Gtk.CellRendererText(), text=2))
+        tree.append_column(Gtk.TreeViewColumn(
+            "Ignored", Gtk.CellRendererText(), text=3))
         scroll = Gtk.ScrolledWindow(vexpand=True)
         scroll.add(tree)
         box.pack_start(scroll, True, True, 0)
@@ -707,11 +709,18 @@ class MainWindow(Gtk.ApplicationWindow):
             model, it = tree.get_selection().get_selected()
             return model[it][0] if it else None
 
-        def refresh_store() -> None:
+        def populate() -> None:
             store.clear()
             for t, c in self.catalog.tag_counts().items():
-                store.append([t, c])
+                store.append([t, c,
+                              "✓" if t in self.catalog.hidden_tags else "",
+                              "✓" if t in self.catalog.ignored_filter_tags else ""])
+
+        def refresh_store() -> None:
+            populate()
             self.refresh_gallery(rescan=False)
+
+        populate()
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
@@ -750,6 +759,28 @@ class MainWindow(Gtk.ApplicationWindow):
         delete_btn.connect("clicked", on_delete)
         actions.pack_start(delete_btn, False, False, 0)
 
+        def toggle_list(getter, setter, tooltip: str, label: str) -> Gtk.Button:
+            btn = Gtk.Button(label=label, tooltip_text=tooltip)
+
+            def on_toggle(_b):
+                tag = selected_tag()
+                if not tag:
+                    return
+                tags = set(getter())
+                tags.symmetric_difference_update({tag})
+                setter(sorted(tags))
+                refresh_store()
+            btn.connect("clicked", on_toggle)
+            actions.pack_start(btn, False, False, 0)
+            return btn
+
+        toggle_list(lambda: self.catalog.hidden_tags,
+                    self.catalog.set_hidden_tags,
+                    "Media with this tag is never shown", "Hide")
+        toggle_list(lambda: self.catalog.ignored_filter_tags,
+                    self.catalog.set_ignored_filter_tags,
+                    "No filter mode takes this tag into account", "Ignore")
+
         export_btn = Gtk.Button(label="Export JSON…")
         export_btn.connect("clicked", self._on_export, dialog)
         actions.pack_end(export_btn, False, False, 0)
@@ -767,10 +798,12 @@ class MainWindow(Gtk.ApplicationWindow):
                                         action=Gtk.FileChooserAction.SAVE)
         chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                             "Export", Gtk.ResponseType.OK)
-        chooser.set_current_name("bglin-tags.json")
+        chooser.set_current_name("tags.json")
         if chooser.run() == Gtk.ResponseType.OK:
-            from pathlib import Path
-            self.catalog.export_json(Path(chooser.get_filename()))
+            self.catalog.export_json(Path(chooser.get_filename()),
+                                     active_tags=self.config.filter_tags,
+                                     filter_mode=self.config.filter_mode,
+                                     auto_tag=self.config.auto_tag_on_scan)
         chooser.destroy()
 
     def _on_import(self, _btn, parent) -> None:
@@ -779,8 +812,12 @@ class MainWindow(Gtk.ApplicationWindow):
         chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                             "Import", Gtk.ResponseType.OK)
         if chooser.run() == Gtk.ResponseType.OK:
-            from pathlib import Path
-            count = self.catalog.import_json(Path(chooser.get_filename()))
+            count, settings = self.catalog.import_json(
+                Path(chooser.get_filename()))
+            for key, value in settings.items():
+                setattr(self.config, key, value)
+            self.config.save()
+            self.filter_mode_combo.set_active_id(self.config.filter_mode)
             self.refresh_gallery(rescan=False)
             self._info("Import finished", f"Tags applied to {count} files.")
         chooser.destroy()
