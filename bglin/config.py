@@ -35,7 +35,12 @@ MONITOR_MODES = {"same": "Same on all screens", "different": "Different per scre
 
 @dataclass
 class Config:
+    # Several folders can feed the library. media_dir is the pre-list config
+    # key: load() migrates it into media_dirs and it stays for old versions.
     media_dir: str = str(paths.DEFAULT_MEDIA_DIR)
+    media_dirs: list = field(default_factory=list)
+    # Off: only the media sitting directly in each folder, no subfolders
+    recursive: bool = False
     interval_seconds: int = 300
     order: str = "sequential"
     mode: str = "zoom"
@@ -64,13 +69,39 @@ class Config:
                 # Configs written before the LumaLoop-compatible modes held
                 # "OR"/"AND"/"XOR"
                 cfg.filter_mode = catalog.normalize_mode(cfg.filter_mode)
+                cfg.normalize_dirs()
                 return cfg
             except (json.JSONDecodeError, TypeError):
                 pass
         cfg = cls()
+        cfg.normalize_dirs()
         cfg.save()
         return cfg
 
+    def normalize_dirs(self) -> None:
+        """Single media_dir (old config) -> media_dirs list, deduped."""
+        folders = [d for d in (self.media_dirs or []) if str(d).strip()]
+        if not folders and self.media_dir:
+            folders = [self.media_dir]
+        seen: list[str] = []
+        for folder in folders:
+            folder = str(folder)
+            if folder not in seen:
+                seen.append(folder)
+        self.media_dirs = seen
+        # Kept in sync so an older bglin reading this file still finds a folder
+        self.media_dir = seen[0] if seen else ""
+
+    def set_media_dirs(self, folders: list) -> None:
+        self.media_dirs = [str(f) for f in folders]
+        self.normalize_dirs()
+
+    @property
+    def media_paths(self) -> list[Path]:
+        return [Path(d).expanduser() for d in self.media_dirs]
+
     @property
     def media_path(self) -> Path:
-        return Path(self.media_dir).expanduser()
+        """First folder: what the "open folder" button and empty-state show."""
+        folders = self.media_paths
+        return folders[0] if folders else Path(paths.DEFAULT_MEDIA_DIR)

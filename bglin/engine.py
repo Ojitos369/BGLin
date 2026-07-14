@@ -35,7 +35,9 @@ class Engine:
 
     def rebuild(self) -> None:
         """Rescan folder, apply tag filter and ordering."""
-        files = self.catalog.scan(self.config.media_path, self.config.auto_tag_on_scan)
+        files = self.catalog.scan(self.config.media_paths,
+                                  self.config.auto_tag_on_scan,
+                                  self.config.recursive)
         if not self.config.video_enabled:
             files = [f for f in files if not is_video(f)]
         # Hidden tags always take media out; the selection only when enabled

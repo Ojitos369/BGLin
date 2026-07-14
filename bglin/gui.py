@@ -152,7 +152,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "folder-open-symbolic", Gtk.IconSize.BUTTON)
         folder_btn.set_tooltip_text("Open wallpaper folder")
         folder_btn.connect("clicked",
-                           lambda *_: self._open_folder(self.config.media_dir))
+                           lambda *_: self._open_folder(str(self.config.media_path)))
         header.pack_end(folder_btn)
 
     # ---------- body ----------
@@ -242,7 +242,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def refresh_gallery(self, rescan: bool = True) -> None:
         if rescan:
-            self.catalog.scan(self.config.media_path, self.config.auto_tag_on_scan)
+            self.catalog.scan(self.config.media_paths,
+                              self.config.auto_tag_on_scan,
+                              self.config.recursive)
         else:
             # The daemon may have touched catalog.json since we last read it
             self.catalog.reload_if_changed()
@@ -265,8 +267,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self._cursor = None
         self._rebuild_chips()
         if not files:
+            folders = "\n".join(self.config.media_dirs) or "(no folders set)"
             placeholder = Gtk.Label(
-                label=f"No images found.\nDrop wallpapers into:\n{self.config.media_dir}")
+                label=f"No images found.\nDrop wallpapers into:\n{folders}")
             placeholder.set_justify(Gtk.Justification.CENTER)
             placeholder.set_margin_top(60)
             self.flow.add(placeholder)
@@ -278,8 +281,10 @@ class MainWindow(Gtk.ApplicationWindow):
             threading.Thread(target=self._load_thumbs, args=(files,),
                              daemon=True).start()
         count = len(files)
+        folders = self.config.media_dirs
+        where = folders[0] if len(folders) == 1 else f"{len(folders)} folders"
         self.status_label.set_text(f"{count} image{'s' if count != 1 else ''}"
-                                   f" — {self.config.media_dir}")
+                                   f" — {where}")
         self._update_selection_ui()
         self._send("reload")
 
@@ -966,12 +971,13 @@ class MainWindow(Gtk.ApplicationWindow):
         chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                             "Import", Gtk.ResponseType.OK)
         if chooser.run() == Gtk.ResponseType.OK:
-            count, settings = self.catalog.import_json(
-                Path(chooser.get_filename()))
-            for key, value in settings.items():
-                setattr(self.config, key, value)
+            count = self.catalog.import_json(Path(chooser.get_filename()))
+            # Importing tags never turns a filter on: the file's activeTags
+            # stay in the file, the filter is the user's to choose
+            self.config.filter_tags = []
+            self.config.filter_enabled = False
             self.config.save()
-            self.filter_mode_combo.set_active_id(self.config.filter_mode)
+            self.filter_switch.set_active(False)
             self.refresh_gallery(rescan=False)
             self._info("Import finished", f"Tags applied to {count} files.")
         chooser.destroy()
@@ -987,11 +993,16 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.get_content_area().add(grid)
         row = 0
 
-        grid.attach(Gtk.Label(label="Wallpaper folder:", xalign=1), 0, row, 1, 1)
-        folder_btn = Gtk.FileChooserButton(
-            title="Wallpaper folder", action=Gtk.FileChooserAction.SELECT_FOLDER)
-        folder_btn.set_filename(self.config.media_dir)
-        grid.attach(folder_btn, 1, row, 1, 1); row += 1
+        grid.attach(Gtk.Label(label="Wallpaper folders:", xalign=1), 0, row, 1, 1)
+        folders_box, folders_list = self._folders_editor(dialog)
+        grid.attach(folders_box, 1, row, 1, 1); row += 1
+
+        grid.attach(Gtk.Label(label="Include subfolders:", xalign=1), 0, row, 1, 1)
+        recursive_sw = Gtk.Switch(
+            halign=Gtk.Align.START,
+            tooltip_text="Off: only the media directly inside each folder")
+        recursive_sw.set_active(self.config.recursive)
+        grid.attach(recursive_sw, 1, row, 1, 1); row += 1
 
         grid.attach(Gtk.Label(label="Interval (seconds):", xalign=1), 0, row, 1, 1)
         interval = Gtk.SpinButton.new_with_range(5, 86400, 5)
@@ -1038,7 +1049,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
-            self.config.media_dir = folder_btn.get_filename() or self.config.media_dir
+            self.config.set_media_dirs(
+                [r[0] for r in folders_list] or self.config.media_dirs)
+            self.config.recursive = recursive_sw.get_active()
             self.config.interval_seconds = int(interval.get_value())
             self.config.order = order.get_active_id() or "sequential"
             self.config.mode = mode.get_active_id() or "zoom"
@@ -1049,6 +1062,59 @@ class MainWindow(Gtk.ApplicationWindow):
             self.config.save()
             self.refresh_gallery(rescan=True)
         dialog.destroy()
+
+    def _folders_editor(self, parent) -> tuple[Gtk.Widget, Gtk.ListStore]:
+        """List of media folders with add/remove. Returns (widget, model)."""
+        store = Gtk.ListStore(str)
+        for folder in self.config.media_dirs:
+            store.append([folder])
+
+        view = Gtk.TreeView(model=store, headers_visible=False)
+        view.append_column(
+            Gtk.TreeViewColumn("Folder", Gtk.CellRendererText(), text=0))
+        view.get_selection().set_mode(Gtk.SelectionMode.SINGLE)
+
+        scroll = Gtk.ScrolledWindow(hexpand=True)
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_size_request(360, 110)
+        scroll.add(view)
+
+        def on_add(_btn):
+            chooser = Gtk.FileChooserDialog(
+                title="Add wallpaper folder", transient_for=parent,
+                action=Gtk.FileChooserAction.SELECT_FOLDER)
+            chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                                "Add", Gtk.ResponseType.OK)
+            chooser.set_select_multiple(True)
+            if chooser.run() == Gtk.ResponseType.OK:
+                current = {row[0] for row in store}
+                for folder in chooser.get_filenames():
+                    if folder not in current:
+                        store.append([folder])
+                        current.add(folder)
+            chooser.destroy()
+
+        def on_remove(_btn):
+            model, it = view.get_selection().get_selected()
+            if it is not None:
+                model.remove(it)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        add_btn = Gtk.Button.new_from_icon_name("list-add-symbolic",
+                                                Gtk.IconSize.BUTTON)
+        add_btn.set_tooltip_text("Add folder")
+        add_btn.connect("clicked", on_add)
+        remove_btn = Gtk.Button.new_from_icon_name("list-remove-symbolic",
+                                                   Gtk.IconSize.BUTTON)
+        remove_btn.set_tooltip_text("Remove selected folder")
+        remove_btn.connect("clicked", on_remove)
+        buttons.pack_start(add_btn, False, False, 0)
+        buttons.pack_start(remove_btn, False, False, 0)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.pack_start(scroll, True, True, 0)
+        box.pack_start(buttons, False, False, 0)
+        return box, store
 
     def _info(self, title: str, message: str) -> None:
         md = Gtk.MessageDialog(transient_for=self, modal=True,

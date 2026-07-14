@@ -166,19 +166,34 @@ class Catalog:
 
     # ---------- scanning ----------
 
-    def scan(self, folder: Path, auto_tag: bool = True) -> list[str]:
-        """Sync catalog with folder contents. Returns sorted list of paths.
+    def scan(self, folders, auto_tag: bool = True,
+             recursive: bool = False) -> list[str]:
+        """Sync catalog with the folders' contents. Returns sorted paths.
 
-        Tags of files that are not in the folder right now are kept (a moved
+        `folders` is one Path or several. Only the media sitting directly in
+        each folder is picked up unless `recursive`.
+
+        Tags of files that are not in the folders right now are kept (a moved
         or temporarily unplugged file must not lose its tags), they are just
         left out of the returned list and of the tag counts.
         """
         self.reload_if_changed()
-        found = []
-        if folder.is_dir():
-            for p in sorted(folder.rglob("*")):
-                if p.is_file() and p.suffix.lower() in MEDIA_EXTENSIONS:
-                    found.append(str(p))
+        if isinstance(folders, (str, Path)):
+            folders = [folders]
+        found: list[str] = []
+        seen: set[str] = set()
+        for folder in folders:
+            folder = Path(folder).expanduser()
+            if not folder.is_dir():
+                continue
+            entries = folder.rglob("*") if recursive else folder.iterdir()
+            for p in sorted(entries):
+                path = str(p)
+                if (path not in seen and p.is_file()
+                        and p.suffix.lower() in MEDIA_EXTENSIONS):
+                    seen.add(path)
+                    found.append(path)
+        found.sort()
         dirty = False
         for path in found:
             if path not in self.media:
@@ -340,13 +355,13 @@ class Catalog:
             )
         )
 
-    def import_json(self, src: Path) -> tuple[int, dict]:
-        """Read a LumaLoop tags file. Returns (files updated, settings).
+    def import_json(self, src: Path) -> int:
+        """Read a LumaLoop tags file. Returns how many files got new tags.
 
         Entries are matched by file name; tags are merged into what a file
-        already has, as LumaLoop's importTagData does. The settings dict carries
-        the fields that live in bglin's config (active tags, mode, auto-tag) so
-        the caller can persist them.
+        already has, as LumaLoop's importTagData does. The filter state the
+        file also carries (activeTags, hiddenTags, mode) is NOT applied:
+        importing tags must never leave the library filtered.
         """
         self.reload_if_changed()
         data = json.loads(src.read_text())
@@ -370,17 +385,5 @@ class Catalog:
         self.add_to_catalog(
             set(data.get("catalog") or ()) | {t for v in by_name.values() for t in v},
             save=False)
-        if data.get("hiddenTags") is not None:
-            self.hidden_tags = _clean_tags(data["hiddenTags"])
-        if data.get("ignoredFilterTags") is not None:
-            self.ignored_filter_tags = _clean_tags(data["ignoredFilterTags"])
         self.save()
-
-        settings = {}
-        if data.get("activeTags") is not None:
-            settings["filter_tags"] = _clean_tags(data["activeTags"])
-        if data.get("tagFilterMode") is not None:
-            settings["filter_mode"] = normalize_mode(data["tagFilterMode"])
-        if data.get("autoTagEnabled") is not None:
-            settings["auto_tag_on_scan"] = bool(data["autoTagEnabled"])
-        return updated, settings
+        return updated
